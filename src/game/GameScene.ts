@@ -10,20 +10,25 @@ const GRID_X = 36;
 const GRID_Y = 96;
 const PANEL_X = 560;
 
-/** Слова, которые нужно найти (всегда помещаются в поле). */
-const WORDS = ['КОТ', 'ДОМ', 'ЛЕС', 'МОРЕ', 'РЕКА', 'ГОРА', 'СНЕГ', 'ЗИМА', 'ВЕСНА', 'ОСЕНЬ'] as const;
+/** Сколько слов в одном раунде. */
+const WORDS_PER_ROUND = 5;
+
+/** Пул слов: каждый раунд из него случайно выбирается WORDS_PER_ROUND слов. */
+const WORD_POOL = [
+  'КОТ', 'ДОМ', 'ЛЕС', 'МОРЕ', 'РЕКА', 'ГОРА', 'СНЕГ',
+  'ЗИМА', 'ВЕСНА', 'ОСЕНЬ', 'ТОРТ', 'ЧАЙ', 'СОК', 'ЛУНА',
+  'ТУЧА', 'ГРОЗА', 'МОСТ', 'ГРИБ', 'МЯЧ', 'РУКА', 'ХЛЕБ', 'КНИГА',
+] as const;
 /** Буквы для заполнения пустых клеток (частотные буквы русского алфавита). */
 const FILLER_LETTERS = 'ОЕАИНТСРВЛКМДПУЯЬГЗБЧЙХЖШЮЦЩЭФЪ';
 
+/**
+ * Направления укладки слов: только горизонталь (справа налево)
+ * и вертикаль (сверху вниз).
+ */
 const DIRECTIONS: ReadonlyArray<{ dr: number; dc: number }> = [
-  { dr: -1, dc: 0 },
-  { dr: -1, dc: 1 },
-  { dr: 0, dc: 1 },
-  { dr: 1, dc: 1 },
-  { dr: 1, dc: 0 },
-  { dr: 1, dc: -1 },
-  { dr: 0, dc: -1 },
-  { dr: -1, dc: -1 },
+  { dr: 0, dc: -1 }, // горизонтально, справа налево
+  { dr: 1, dc: 0 }, // вертикально, сверху вниз
 ];
 
 /** Сколько секунд экран остаётся зелёным после найденного слова. */
@@ -62,6 +67,8 @@ interface CellCoord {
 interface PlacedWord {
   word: string;
   cells: CellCoord[];
+  /** true — слово лежит вертикально (сверху вниз), false — горизонтально (справа налево). */
+  vertical: boolean;
   found: boolean;
 }
 
@@ -75,9 +82,10 @@ type CellState = 'base' | 'selected' | 'found';
 
 /**
  * Филворд: на поле из букв спрятаны слова.
- * Игрок проводит мышью/пальцем по буквам, собирая цепочку. Если получилось слово
- * из списка — буквы зачёркиваются, экран вспыхивает зелёным, игра продолжается,
- * пока не будут найдены все слова.
+ * Слова лежат только горизонтально (справа налево) или вертикально (сверху вниз)
+ * и не пересекаются. Игрок проводит мышью/пальцем по буквам прямой линией; если
+ * получилось слово из раунда — его буквы зачёркиваются до конца раунда, экран
+ * вспыхивает зелёным. В каждом раунде 5 случайных слов, при перезапуске — новые.
  */
 export class GameScene extends Phaser.Scene {
   private letters: string[][] = [];
@@ -123,7 +131,7 @@ export class GameScene extends Phaser.Scene {
       .setOrigin(0, 0);
 
     this.add
-      .text(GRID_X, 66, 'Проведи по буквам и собери все слова. ESC — сбросить выделение.', {
+      .text(GRID_X, 66, 'Собирай слова: горизонтально справа налево или вертикально сверху вниз. ESC — сбросить.', {
         fontFamily: 'system-ui, sans-serif',
         fontSize: '16px',
         color: toCss(COLOR_MUTED),
@@ -180,16 +188,17 @@ export class GameScene extends Phaser.Scene {
         Array<string>(GRID_COLS).fill(''),
       );
       const placed: PlacedWord[] = [];
-      const shuffled = [...WORDS].sort(() => Math.random() - 0.5);
+      const shuffled = [...WORD_POOL].sort(() => Math.random() - 0.5);
+      const roundWords = shuffled.slice(0, WORDS_PER_ROUND);
       let allPlaced = true;
 
-      for (const word of shuffled) {
-        const cells = this.tryPlaceWord(word, grid);
-        if (!cells) {
+      for (const word of roundWords) {
+        const result = this.tryPlaceWord(word, grid);
+        if (!result) {
           allPlaced = false;
           break;
         }
-        placed.push({ word, cells, found: false });
+        placed.push({ word, cells: result.cells, vertical: result.vertical, found: false });
       }
 
       if (!allPlaced) continue;
@@ -206,10 +215,18 @@ export class GameScene extends Phaser.Scene {
     throw new Error('Не удалось сгенерировать поле.');
   }
 
-  /** Пытается разместить слово прямыми линиями (8 направлений), не пересекая другие слова. */
-  private tryPlaceWord(word: string, grid: string[][]): CellCoord[] | null {
+  /**
+   * Пытается разместить слово по одному из двух направлений
+   * (горизонталь справа налево, вертикаль сверху вниз).
+   * Слова не пересекаются: занятая клетка блокирует новое размещение.
+   */
+  private tryPlaceWord(
+    word: string,
+    grid: string[][],
+  ): { cells: CellCoord[]; vertical: boolean } | null {
     for (let attempt = 0; attempt < 300; attempt++) {
       const dir = pick(DIRECTIONS);
+      const vertical = dir.dc === 0;
       const startRow = randInt(GRID_ROWS);
       const startCol = randInt(GRID_COLS);
       const endRow = startRow + (word.length - 1) * dir.dr;
@@ -233,7 +250,7 @@ export class GameScene extends Phaser.Scene {
       for (let i = 0; i < word.length; i++) {
         grid[cells[i].row][cells[i].col] = word[i];
       }
-      return cells;
+      return { cells, vertical };
     }
     return null;
   }
@@ -241,6 +258,12 @@ export class GameScene extends Phaser.Scene {
   // ── Отрисовка ─────────────────────────────────────────────────
 
   private buildCells(): void {
+    // Направление зачёркивания зависит от того, как лежит слово.
+    const verticalByCell = new Map<string, boolean>();
+    for (const pw of this.placedWords) {
+      for (const c of pw.cells) verticalByCell.set(`${c.row},${c.col}`, pw.vertical);
+    }
+
     for (let row = 0; row < GRID_ROWS; row++) {
       this.cells[row] = [];
       for (let col = 0; col < GRID_COLS; col++) {
@@ -257,7 +280,8 @@ export class GameScene extends Phaser.Scene {
           .setOrigin(0.5);
         const strike = this.add
           .rectangle(x, y, CELL_SIZE - 8, 3, COLOR_STRIKE)
-          .setAlpha(0);
+          .setAlpha(0)
+          .setRotation(verticalByCell.get(`${row},${col}`) ? Math.PI / 2 : 0);
 
         this.cells[row][col] = { bg, letter, strike };
       }
@@ -390,17 +414,45 @@ export class GameScene extends Phaser.Scene {
 
   // ── Проверка и результат ──────────────────────────────────────
 
+  /** Цепочка должна идти прямой линией: по горизонтали справа налево или по вертикали сверху вниз. */
+  private isAllowedDirection(): boolean {
+    const first = this.selection[0];
+    const sameRow = this.selection.every((c) => c.row === first.row);
+    const sameCol = this.selection.every((c) => c.col === first.col);
+
+    if (sameRow) {
+      // Горизонталь: колонки строго убывают (справа налево).
+      for (let i = 0; i < this.selection.length - 1; i++) {
+        if (this.selection[i].col <= this.selection[i + 1].col) return false;
+      }
+      return true;
+    }
+
+    if (sameCol) {
+      // Вертикаль: строки строго возрастают (сверху вниз).
+      for (let i = 0; i < this.selection.length - 1; i++) {
+        if (this.selection[i].row >= this.selection[i + 1].row) return false;
+      }
+      return true;
+    }
+
+    return false;
+  }
+
   private validateSelection(): void {
     if (this.selection.length < 2) {
       this.clearSelection();
       return;
     }
 
+    // Слова можно собрать только прямой линией в разрешённом направлении.
+    if (!this.isAllowedDirection()) {
+      this.clearSelection();
+      return;
+    }
+
     const drawn = this.selection.map((c) => this.letters[c.row][c.col]).join('');
-    const reversed = [...drawn].reverse().join('');
-    const match = this.placedWords.find(
-      (pw) => !pw.found && (pw.word === drawn || pw.word === reversed),
-    );
+    const match = this.placedWords.find((pw) => !pw.found && pw.word === drawn);
 
     if (!match) {
       this.clearSelection();
